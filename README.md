@@ -2,7 +2,7 @@
 
 **VisionView** is a modular, high-performance Computer Vision and Industrial Camera inspection application built with **PySide6 (Qt for Python)**, **OpenCV**, and the **Basler Pylon Camera SDK**.
 
-Get the latest release: [VisionView](https://github.com/Fyzie/visionview/releases/tag/v1.0.0)
+Get the latest release: [VisionView](https://github.com/irnow/visionview/releases/tag/v1.0.0)
 
 ---
 
