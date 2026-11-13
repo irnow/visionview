@@ -6,6 +6,7 @@ __pycache__/
 # Output media directories (stored alongside main program dir)
 media_output/
 test_media_output/
+test_shortcut_dir/
 
 # Captured media files
 *.avi
@@ -16,7 +17,7 @@ test_media_output/
 *.jpg
 *.jpeg
 
-# Virtual environments
+# secrets
 venv/
 env/
 ENV/

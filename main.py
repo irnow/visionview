@@ -9,7 +9,7 @@ from PySide6.QtCore import Qt, Slot, QSize
 from PySide6.QtGui import QAction, QIcon, QActionGroup, QKeySequence
 
 from utils.window_module import WindowModule, get_module_icon
-from utils.process_canva import ProcessWindow
+from utils.process_canva import ProcessWindow, get_cached_cv_modules
 from utils.gui_signal import gui_signal
 from utils.directory_viewer import DirectoryViewer
 from camera import *
@@ -29,6 +29,8 @@ else:
     DEFAULT_OUTPUT_DIR = BASE_DIR.parent / "media_output"
 
 ICON_DIR = BASE_DIR / "icons"
+ARROW_UP_PATH = (ICON_DIR / "arrow_up.png").as_posix()
+ARROW_DOWN_PATH = (ICON_DIR / "arrow_down.png").as_posix()
 
 CHECKBOX_STYLESHEET = """
 QCheckBox {
@@ -114,11 +116,9 @@ QSpinBox::up-button:pressed, QDoubleSpinBox::up-button:pressed {
     background-color: #d0d0d0;
 }
 QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
-    width: 0;
-    height: 0;
-    border-left: 4px solid transparent;
-    border-right: 4px solid transparent;
-    border-bottom: 5px solid #555555;
+    image: url("__ARROW_UP__");
+    width: 9px;
+    height: 6px;
 }
 QSpinBox::down-button, QDoubleSpinBox::down-button {
     subcontrol-origin: border;
@@ -135,11 +135,9 @@ QSpinBox::down-button:pressed, QDoubleSpinBox::down-button:pressed {
     background-color: #d0d0d0;
 }
 QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
-    width: 0;
-    height: 0;
-    border-left: 4px solid transparent;
-    border-right: 4px solid transparent;
-    border-top: 5px solid #555555;
+    image: url("__ARROW_DOWN__");
+    width: 9px;
+    height: 6px;
 }
 QComboBox {
     background-color: #ffffff;
@@ -168,11 +166,9 @@ QComboBox::drop-down:hover {
     background-color: #e5e5e5;
 }
 QComboBox::down-arrow {
-    width: 0;
-    height: 0;
-    border-left: 4px solid transparent;
-    border-right: 4px solid transparent;
-    border-top: 5px solid #555555;
+    image: url("__ARROW_DOWN__");
+    width: 9px;
+    height: 6px;
 }
 QComboBox QAbstractItemView {
     background-color: #ffffff;
@@ -198,6 +194,7 @@ QLineEdit:focus {
     border: 1px solid #0078d4;
 }
 """
+CHECKBOX_STYLESHEET = CHECKBOX_STYLESHEET.replace("__ARROW_UP__", ARROW_UP_PATH).replace("__ARROW_DOWN__", ARROW_DOWN_PATH)
 
 class VisionApp(QMainWindow):
     def __init__(self):
@@ -215,6 +212,7 @@ class VisionApp(QMainWindow):
         self.setup_menu()
         self.setup_ui()
 
+        self.global_calibration = {'scale': 1.0, 'unit': 'px', 'is_calibrated': False}
         self.active_cameras = [] # active camera name (e.g. 2322315), not active module
         self.dir_popup = None   # save directory popup
         self.module_counter = 0
@@ -224,9 +222,21 @@ class VisionApp(QMainWindow):
         gui_signal.module_selected.connect(self.set_active_module)
         gui_signal.update_active_cameras.connect(self.update_active_camera)
 
+        if hasattr(self, 'process_dock'):
+            self.process_dock.visibilityChanged.connect(
+                lambda visible: self.show_module_process_editor(self.active_module) if visible and self.active_module else None
+            )
+
+        # Pre-warm icons and CV module list so adding modules is instantaneous
+        try:
+            get_module_icon("open_in_full", "white")
+            get_module_icon("close", "white")
+            get_cached_cv_modules()
+        except Exception:
+            pass
+
     def setup_menu(self):
         menubar = self.menuBar()
-        menubar.addMenu("File")
         self.view_menu = menubar.addMenu("View")
         self.tools_menu = menubar.addMenu("Tools")
         menubar.addMenu("Help")
@@ -308,6 +318,25 @@ class VisionApp(QMainWindow):
         self.toolbar.addWidget(self.btn_select_dir)
         self.toolbar.addWidget(self.dir_edit)
 
+        # ---- MEASUREMENT & METROLOGY TOOLBAR ----
+        self.measure_toolbar = QToolBar("Inspection & Metrology Tools")
+        self.measure_toolbar.setIconSize(QSize(26, 26))
+        self.measure_toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.addToolBar(self.measure_toolbar)
+
+        self.measure_toolbar.addAction(self.zoom_tool)
+        self.measure_toolbar.addAction(self.length_tool)
+        self.measure_toolbar.addAction(self.caliper_tool)
+        self.measure_toolbar.addAction(self.circle_tool)
+        self.measure_toolbar.addAction(self.circle_3p_tool)
+        self.measure_toolbar.addAction(self.angle_tool)
+        self.measure_toolbar.addAction(self.square_tool)
+        self.measure_toolbar.addAction(self.polygon_tool)
+        self.measure_toolbar.addSeparator()
+        self.measure_toolbar.addAction(self.calibrate_tool)
+        self.measure_toolbar.addSeparator()
+        self.measure_toolbar.addAction(self.clear_measure_tool)
+
         self.active_module = None
 
     def setup_ui(self):
@@ -386,34 +415,125 @@ class VisionApp(QMainWindow):
     def tools_setup(self):
         self.tool_group = QActionGroup(self)
 
-        self.zoom_tool = self.tools_menu.addAction("Zoom")
+        self.zoom_tool = QAction(MaterialIcon("search"), "Zoom", self)
+        self.zoom_tool.setData("zoom")
         self.zoom_tool.setCheckable(True)
-        self.zoom_tool.setChecked(True) # Default
+        self.zoom_tool.setChecked(True)
+        self.zoom_tool.setToolTip("Zoom Tool (Drag ROI to zoom in, Right-click to reset)")
         self.tool_group.addAction(self.zoom_tool)
+        self.tools_menu.addAction(self.zoom_tool)
 
-        self.length_tool = self.tools_menu.addAction("Length")
+        self.length_tool = QAction(MaterialIcon("straighten"), "Length", self)
+        self.length_tool.setData("length")
         self.length_tool.setCheckable(True)
+        self.length_tool.setToolTip("Length Tool (Drag between points to measure linear distance)")
         self.tool_group.addAction(self.length_tool)
+        self.tools_menu.addAction(self.length_tool)
 
-        # Separate Area tools into Square and Polygon
+        self.caliper_tool = QAction(MaterialIcon("linear_scale"), "Edge Caliper (Sub-Pixel)", self)
+        self.caliper_tool.setData("caliper")
+        self.caliper_tool.setCheckable(True)
+        self.caliper_tool.setToolTip("Sub-Pixel Edge Caliper (Drag across edge to detect peak gradients and measure features)")
+        self.tool_group.addAction(self.caliper_tool)
+        self.tools_menu.addAction(self.caliper_tool)
+
+        # Circle tools menu & actions
+        self.circle_menu = self.tools_menu.addMenu("Circle")
+        self.circle_tool = QAction(MaterialIcon("radio_button_unchecked"), "Circle (Center-Radius)", self)
+        self.circle_tool.setData("circle")
+        self.circle_tool.setCheckable(True)
+        self.circle_tool.setToolTip("Circle Tool (Drag from center outward to radius)")
+        self.tool_group.addAction(self.circle_tool)
+        self.circle_menu.addAction(self.circle_tool)
+
+        self.circle_3p_tool = QAction(MaterialIcon("circle"), "Circle (3-Point Fit)", self)
+        self.circle_3p_tool.setData("circle_3p")
+        self.circle_3p_tool.setCheckable(True)
+        self.circle_3p_tool.setToolTip("Circle (3-Point) (Click 3 points on rim/hole to fit circumcircle)")
+        self.tool_group.addAction(self.circle_3p_tool)
+        self.circle_menu.addAction(self.circle_3p_tool)
+
+        # Angle tool
+        self.angle_tool = QAction(MaterialIcon("square_foot"), "Angle / Protractor", self)
+        self.angle_tool.setData("angle")
+        self.angle_tool.setCheckable(True)
+        self.angle_tool.setToolTip("Angle Protractor (Click Point 1 -> Vertex -> Point 2 to measure interior angle)")
+        self.tool_group.addAction(self.angle_tool)
+        self.tools_menu.addAction(self.angle_tool)
+
+        # Area tools menu & actions
         self.area_menu = self.tools_menu.addMenu("Area")
-
-        self.square_tool = self.area_menu.addAction("Square")
+        self.square_tool = QAction(MaterialIcon("crop_square"), "Square", self)
+        self.square_tool.setData("square")
         self.square_tool.setCheckable(True)
+        self.square_tool.setToolTip("Square / Rectangle Area (Drag bounding box)")
         self.tool_group.addAction(self.square_tool)
+        self.area_menu.addAction(self.square_tool)
 
-        self.polygon_tool = self.area_menu.addAction("Polygon")
+        self.polygon_tool = QAction(MaterialIcon("polyline"), "Polygon", self)
+        self.polygon_tool.setData("polygon")
         self.polygon_tool.setCheckable(True)
+        self.polygon_tool.setToolTip("Polygon Area (Click vertices, double-click or click start point to close)")
         self.tool_group.addAction(self.polygon_tool)
+        self.area_menu.addAction(self.polygon_tool)
+
+        self.tools_menu.addSeparator()
+
+        # Calibration
+        self.calibrate_tool = QAction(MaterialIcon("tune"), "Calibrate Scale (px -> mm)", self)
+        self.calibrate_tool.setData("calibrate")
+        self.calibrate_tool.setCheckable(True)
+        self.calibrate_tool.setToolTip("Scale Calibration (Drag line across known dimension e.g. 10 mm ruler)")
+        self.tool_group.addAction(self.calibrate_tool)
+        self.tools_menu.addAction(self.calibrate_tool)
+        self.tools_menu.addSeparator()
+
+        # Clear measurements
+        self.clear_measure_tool = QAction(MaterialIcon("delete"), "Clear Measurements", self)
+        self.clear_measure_tool.setToolTip("Clear all measurements on active module")
+        self.clear_measure_tool.triggered.connect(self.clear_active_measurements)
+        self.tools_menu.addAction(self.clear_measure_tool)
 
         self.tool_group.triggered.connect(self.update_tool_mode)
 
     def update_tool_mode(self, action):
-        mode = action.text().lower() 
+        mode = action.data()
+        if not mode:
+            raw_mode = action.text().lower() 
+            if "template" in raw_mode:
+                mode = "template"
+            elif "caliper" in raw_mode:
+                mode = "caliper"
+            elif "3-point" in raw_mode or "circle_3p" in raw_mode:
+                mode = "circle_3p"
+            elif "circle" in raw_mode:
+                mode = "circle"
+            elif "angle" in raw_mode:
+                mode = "angle"
+            elif "calibrate" in raw_mode:
+                mode = "calibrate"
+            elif "polygon" in raw_mode:
+                mode = "polygon"
+            elif "square" in raw_mode or "rectangle" in raw_mode:
+                mode = "square"
+            elif "length" in raw_mode:
+                mode = "length"
+            else:
+                mode = "zoom"
+
         for mod in self.modules:
             mod.current_tool = mode
-            if hasattr(mod.label, 'cancel_polygon'):
+            if hasattr(mod.label, 'cancel_all_in_progress'):
+                mod.label.cancel_all_in_progress()
+            elif hasattr(mod.label, 'cancel_polygon'):
                 mod.label.cancel_polygon()
+
+    def clear_active_measurements(self):
+        if hasattr(self, 'active_module') and self.active_module:
+            self.active_module.measurements = []
+            if hasattr(self.active_module.label, 'cancel_all_in_progress'):
+                self.active_module.label.cancel_all_in_progress()
+            self.active_module.label.update()
 
     def open_save_directory_popup(self):
         """Now acts as a 'Show/Focus' trigger for the dock"""
@@ -443,19 +563,17 @@ class VisionApp(QMainWindow):
             if getattr(mod, 'is_fullscreen_window', False):
                 mod.exit_fullscreen_window()
 
-        self.module_counter += 1
-        new_mod = WindowModule(self, self.module_counter)
+        new_index = len(self.modules) + 1
+        new_mod = WindowModule(self, new_index)
         
-        if self.zoom_tool.isChecked():
-            new_mod.current_tool = "zoom"
-        elif self.length_tool.isChecked():
-            new_mod.current_tool = "length"
-        elif hasattr(self, 'square_tool') and self.square_tool.isChecked():
-            new_mod.current_tool = "square"
-        elif hasattr(self, 'polygon_tool') and self.polygon_tool.isChecked():
-            new_mod.current_tool = "polygon"
+        checked = self.tool_group.checkedAction() if hasattr(self, 'tool_group') else None
+        if checked:
+            new_mod.current_tool = checked.data() or "zoom"
         else:
             new_mod.current_tool = "zoom"
+
+        if hasattr(self, 'global_calibration') and self.global_calibration.get('is_calibrated'):
+            new_mod.apply_calibration(self.global_calibration.copy())
 
         self.modules.append(new_mod)
         # Restore any existing enlarged module to smaller module and rearrange into normal grid
@@ -647,6 +765,15 @@ class VisionApp(QMainWindow):
 
         # Delete widget
         module_to_remove.deleteLater()
+
+        # Re-index all remaining modules so numbering is always continuous: 1, 2, ..., N
+        for i, mod in enumerate(self.modules, start=1):
+            if hasattr(mod, 'update_index'):
+                mod.update_index(i)
+            else:
+                mod.index = i
+                if hasattr(mod, 'title_label'):
+                    mod.title_label.setText(f"Module {i}")
 
         # If the active module was removed
         if module_to_remove == self.active_module:

@@ -211,11 +211,9 @@ class Basler():
                 background-color: #d0d0d0;
             }
             QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
-                width: 0;
-                height: 0;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-bottom: 5px solid #555555;
+                image: url("icons/arrow_up.png");
+                width: 9px;
+                height: 6px;
             }
             QSpinBox::down-button, QDoubleSpinBox::down-button {
                 subcontrol-origin: border;
@@ -232,11 +230,9 @@ class Basler():
                 background-color: #d0d0d0;
             }
             QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
-                width: 0;
-                height: 0;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-top: 5px solid #555555;
+                image: url("icons/arrow_down.png");
+                width: 9px;
+                height: 6px;
             }
             QComboBox {
                 background-color: #ffffff;
@@ -265,11 +261,9 @@ class Basler():
                 background-color: #e5e5e5;
             }
             QComboBox::down-arrow {
-                width: 0;
-                height: 0;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-top: 5px solid #555555;
+                image: url("icons/arrow_down.png");
+                width: 9px;
+                height: 6px;
             }
             QComboBox QAbstractItemView {
                 background-color: #ffffff;

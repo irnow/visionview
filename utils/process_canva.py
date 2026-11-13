@@ -67,6 +67,14 @@ class ProcessWindow(QWidget):
             self.window_module.saved_nodes = self.canvas.get_save_data()
         super().hideEvent(event)
 
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+            if hasattr(self, 'canvas') and self.canvas:
+                self.canvas.delete_selected_items()
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
 # -------------------------------
 # NODE CANVAS
 # -------------------------------
@@ -231,6 +239,35 @@ class NodeCanvas(QGraphicsView):
             self.connection_start = None
 
         super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+            self.delete_selected_items()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def delete_selected_items(self):
+        """Removes all currently selected NodeBlocks and Connections, keeps Input/Output nodes"""
+        selected = self.scene.selectedItems()
+        if not selected:
+            return
+
+        nodes_to_remove = [item for item in selected if isinstance(item, NodeBlock) and not isinstance(item, (InputNode, OutputNode))]
+        conns_to_remove = [item for item in selected if isinstance(item, NodeConnection)]
+
+        for node in nodes_to_remove:
+            node.remove_self()
+
+        for conn in conns_to_remove:
+            if conn.scene() is not None:
+                if hasattr(conn, 'start_socket') and conn in getattr(conn.start_socket, 'connections', []):
+                    conn.start_socket.connections.remove(conn)
+                if hasattr(conn, 'end_socket') and conn in getattr(conn.end_socket, 'connections', []):
+                    conn.end_socket.connections.remove(conn)
+                self.scene.removeItem(conn)
+
+        self.update_pipeline_live()
 
     def update_pipeline_live(self):
         """Helper to find the parent window and trigger send_to_worker"""
@@ -464,6 +501,43 @@ class OutputNode(QGraphicsRectItem):
 # -------------------------------
 # MODULE LIST
 # -------------------------------
+_CV_MODULES_CACHE = None
+
+def get_cached_cv_modules():
+    global _CV_MODULES_CACHE
+    if _CV_MODULES_CACHE is not None:
+        return _CV_MODULES_CACHE
+
+    from pathlib import Path
+    import sys
+
+    folder = Path(__file__).resolve().parent.parent / "computer_vision"
+    if not folder.exists() and getattr(sys, 'frozen', False):
+        base = Path(getattr(sys, '_MEIPASS', Path(sys.executable).parent))
+        if (base / "computer_vision").exists():
+            folder = base / "computer_vision"
+
+    modules_to_add = []
+    if folder.exists():
+        for file in folder.iterdir():
+            if file.suffix in [".py", ".pyc"]:
+                name = file.stem
+                if name not in ["parameter_dialog", "__init__"]:
+                    display_name = name.replace("_", " ").title()
+                    if display_name not in modules_to_add:
+                        modules_to_add.append(display_name)
+
+    if not modules_to_add:
+        modules_to_add = [
+            "Canny Edge Detection", "Clahe", "Color Segmentation",
+            "Contour Analysis", "Crop", "Deep Learning", "Gaussian Blur",
+            "Morphology", "Optical Character Recognition", "Resize", "Template Matching", "Threshold"
+        ]
+
+    modules_to_add.sort()
+    _CV_MODULES_CACHE = modules_to_add
+    return _CV_MODULES_CACHE
+
 # List of CV modules on right panel
 class ModuleList(QWidget):
     def __init__(self, canvas):
@@ -488,37 +562,9 @@ class ModuleList(QWidget):
         self.load_modules()
 
     def load_modules(self):
-        """Load modules from the folder sorted alphabetically"""
-        from pathlib import Path
-        import sys
-        
-        folder = Path(__file__).resolve().parent.parent / "computer_vision"
-        if not folder.exists() and getattr(sys, 'frozen', False):
-            base = Path(getattr(sys, '_MEIPASS', Path(sys.executable).parent))
-            if (base / "computer_vision").exists():
-                folder = base / "computer_vision"
+        """Load modules from the folder sorted alphabetically (cached)"""
+        modules_to_add = get_cached_cv_modules()
 
-        modules_to_add = []
-        if folder.exists():
-            for file in folder.iterdir():
-                if file.suffix in [".py", ".pyc"]:
-                    name = file.stem
-                    if name not in ["parameter_dialog", "__init__"]:
-                        display_name = name.replace("_", " ").title()
-                        if display_name not in modules_to_add:
-                            modules_to_add.append(display_name)
-
-        if not modules_to_add:
-            # Fallback for frozen environments if modules are bundled without loose script files
-            modules_to_add = [
-                "Canny Edge Detection", "Clahe", "Crop", "Deep Learning",
-                "Gaussian Blur", "Resize", "Threshold"
-            ]
-
-        # 2. Sort the list alphabetically
-        modules_to_add.sort()
-
-        # 3. Add the sorted items to the list widget
         ai_supported, ai_reason, _ = check_deep_learning_support()
         for display_name in modules_to_add:
             item = QListWidgetItem(display_name)
@@ -734,14 +780,31 @@ class NodeBlock(QGraphicsRectItem):
                 show_unsupported_feature_popup(parent=parent_widget, feature_name="Deep Learning", reason=reason)
                 return
 
+        # Check if an existing dialog for this block is already open
+        if hasattr(self, 'active_dialog') and self.active_dialog is not None:
+            try:
+                if self.active_dialog.isVisible():
+                    self.active_dialog.raise_()
+                    self.active_dialog.activateWindow()
+                    return
+            except RuntimeError:
+                self.active_dialog = None
+
         dialog = ParameterDialog(self.title, self.param_def, self.parameters, parent=parent_widget)
+        self.active_dialog = dialog
         
         # Connect the LIVE signal
         dialog.parametersChanged.connect(self.on_live_update)
-        
-        if dialog.exec():
+
+        def on_dialog_finished(result):
             self.parameters = dialog.get_values()
             self.on_live_update(self.parameters)
+            self.active_dialog = None
+
+        dialog.finished.connect(on_dialog_finished)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def on_live_update(self, new_params):
         self.parameters = new_params
@@ -772,6 +835,13 @@ class NodeBlock(QGraphicsRectItem):
 
     def remove_self(self):
         """Safely removes the node and all its connected lines"""
+        if hasattr(self, 'active_dialog') and self.active_dialog is not None:
+            try:
+                self.active_dialog.close()
+            except RuntimeError:
+                pass
+            self.active_dialog = None
+
         # 1. Gather all connections from both input and output sockets
         all_connections = list(self.input_socket.connections + self.output_socket.connections)
         scene_ref = self.scene()

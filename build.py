@@ -65,7 +65,7 @@ def check_dependencies():
         print("  [!] PyInstaller not found! Installing...")
         subprocess.check_call([sys.executable, "-m", "pip", "install", "pyinstaller>=6.5.0"])
         
-    core_pkgs = ["PySide6", "cv2", "numpy", "qt_material_icons", "pypylon"]
+    core_pkgs = ["PySide6", "cv2", "numpy", "qt_material_icons", "pypylon", "pytesseract"]
     missing_pkgs = []
     for pkg in core_pkgs:
         try:

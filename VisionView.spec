@@ -30,6 +30,7 @@ hiddenimports = [
     'PySide6.QtGui',
     'PySide6.QtWidgets',
     'qt_material_icons',
+    'pytesseract',
     
     # Internal project modules
     'camera.basler',
@@ -45,13 +46,22 @@ hiddenimports = [
     'computer_vision.parameter_dialog',
     'computer_vision.resize',
     'computer_vision.threshold',
+    'computer_vision.color_segmentation',
+    'computer_vision.morphology',
+    'computer_vision.contour_analysis',
+    'computer_vision.template_matching',
+    'computer_vision.optical_character_recognition',
     'utils.annotators',
+    'utils.calibration_dialog',
     'utils.directory_viewer',
     'utils.device_compatibility',
     'utils.gui_signal',
+    'utils.metrology',
     'utils.process_canva',
     'utils.video_label',
     'utils.window_module',
+    'ai_modules.rfdetr_bbox',
+    'ai_modules.rfdetr_segmentation',
 ]
 
 # 2. Add all 12 qt_material_icons resource combinations
@@ -81,7 +91,7 @@ except Exception:
 try:
     import rfdetr
     datas += copy_metadata('rfdetr')
-    hiddenimports += ['rfdetr', 'rfdetr.config', 'ai_modules.rfdetr_inference']
+    hiddenimports += ['rfdetr', 'rfdetr.config', 'ai_modules.rfdetr_bbox', 'ai_modules.rfdetr_segmentation']
 except ImportError:
     pass
 
