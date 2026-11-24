@@ -9,7 +9,7 @@ import shutil
 import subprocess
 from PySide6.QtCore import Qt, QThread, Signal, QSettings
 from PySide6.QtWidgets import (
-    QDialog, QMessageBox, QCheckBox, QVBoxLayout, QHBoxLayout,
+    QApplication, QDialog, QMessageBox, QCheckBox, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QProgressBar, QPlainTextEdit
 )
 
@@ -127,6 +127,18 @@ def set_device_setting(key, value):
         pass
 
 
+def _log_import_failure(name):
+    """Record the full traceback of a failed AI import (the frozen app has no console)."""
+    import traceback
+    tb = traceback.format_exc()
+    print(tb, file=sys.stderr)
+    try:
+        from utils.ai_runtime import write_log
+        write_log(f"Failed to import {name}:\n{tb}")
+    except Exception:
+        pass
+
+
 def check_deep_learning_support(force_refresh=False):
     """
     Checks whether PyTorch, Torchvision, and AI inference can run on this device.
@@ -160,15 +172,18 @@ def check_deep_learning_support(force_refresh=False):
         import torch
         details["torch"] = True
         details["torch_version"] = torch.__version__
-    except ImportError:
+    except ImportError as e:
+        _log_import_failure("torch")
         res = (
             False,
-            "The PyTorch ('torch') deep learning library is not installed or bundled in this application build.",
+            "The PyTorch ('torch') deep learning library is not installed or bundled in this application build."
+            + (f" ({e})" if getattr(e, "name", None) != "torch" else ""),
             details
         )
         _COMPATIBILITY_CACHE = res
         return res
     except Exception as e:
+        _log_import_failure("torch")
         res = (
             False,
             f"PyTorch failed to load on this device: {e}",
@@ -183,6 +198,7 @@ def check_deep_learning_support(force_refresh=False):
         details["torchvision"] = True
         details["torchvision_version"] = torchvision.__version__
     except ImportError:
+        _log_import_failure("torchvision")
         res = (
             False,
             "The 'torchvision' computer vision library is not installed on this system.",
@@ -191,6 +207,7 @@ def check_deep_learning_support(force_refresh=False):
         _COMPATIBILITY_CACHE = res
         return res
     except Exception as e:
+        _log_import_failure("torchvision")
         res = (
             False,
             f"Torchvision failed to load on this device: {e}",
@@ -229,22 +246,36 @@ def check_deep_learning_support(force_refresh=False):
     try:
         import rfdetr
         details["rfdetr"] = True
-    except ImportError:
+    except Exception:
+        _log_import_failure("rfdetr")
         details["rfdetr"] = False
 
     res = (True, "Supported", details)
+    try:
+        from utils.ai_runtime import write_log
+        write_log(f"Deep learning check passed: {details}")
+    except Exception:
+        pass
     _COMPATIBILITY_CACHE = res
     return res
 
 
 class TorchInstallWorker(QThread):
+    """
+    Installs PyTorch + Torchvision for this device.
+    - Frozen VisionView.exe: builds a side-by-side runtime (ai_runtime/) with uv,
+      because the exe has no Python interpreter or pip of its own.
+    - Running from source: installs into the current Python interpreter.
+    The CUDA wheel index is chosen from the installed NVIDIA driver version.
+    """
     progress_output = Signal(str)
     status_changed = Signal(str)
     finished = Signal(bool, str)
 
-    def __init__(self, python_exe=None, parent=None):
+    def __init__(self, python_exe=None, parent=None, driver_version=None):
         super().__init__(parent)
         self.python_exe = python_exe or sys.executable
+        self.driver_version = driver_version
         self._is_cancelled = False
         self._process = None
 
@@ -256,60 +287,111 @@ class TorchInstallWorker(QThread):
             except Exception:
                 pass
 
-    def run(self):
-        self.status_changed.emit("Resolving PyTorch CUDA installation packages...")
-        cmd = [
-            self.python_exe,
-            "-m", "pip", "install",
-            "torch", "torchvision",
-            "--index-url", "https://download.pytorch.org/whl/cu121",
-            "--no-warn-script-location"
-        ]
-        self.progress_output.emit(f"Executing: {' '.join(cmd)}\n")
-
+    def _run_command(self, cmd, env=None):
+        """Run one command, streaming output to the log. Returns the exit code."""
+        self.progress_output.emit(f"\n> {subprocess.list2cmdline([str(c) for c in cmd])}")
+        creationflags = 0x08000000 if sys.platform == "win32" else 0
+        # The frozen app's bootloader calls SetDllDirectory(_internal), which child
+        # processes inherit: torch in the runtime would then load the app's bundled
+        # MSVC DLLs instead of its own/system ones. Reset it while spawning.
+        reset_dll_dir = sys.platform == "win32" and getattr(sys, "frozen", False)
+        if reset_dll_dir:
+            import ctypes
+            ctypes.windll.kernel32.SetDllDirectoryW(None)
         try:
-            creationflags = 0x08000000 if sys.platform == "win32" else 0
             self._process = subprocess.Popen(
-                cmd,
+                [str(c) for c in cmd],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 bufsize=1,
+                env=env,
                 creationflags=creationflags
             )
+        finally:
+            if reset_dll_dir:
+                ctypes.windll.kernel32.SetDllDirectoryW(getattr(sys, "_MEIPASS", None))
+        for line in iter(self._process.stdout.readline, ''):
+            if self._is_cancelled:
+                break
+            stripped = line.strip()
+            if stripped:
+                self.progress_output.emit(stripped)
+        self._process.stdout.close()
+        return self._process.wait()
 
-            for line in iter(self._process.stdout.readline, ''):
+    def _build_plan(self):
+        """Returns (steps, env, install_root or None)."""
+        from utils import ai_runtime
+
+        driver = self.driver_version
+        if driver is None:
+            driver = detect_gpu_hardware().get("driver_version")
+        index_tag = ai_runtime.select_torch_index(driver)
+        numpy_version = ai_runtime.bundled_numpy_version()
+        self.progress_output.emit(
+            f"NVIDIA driver: {driver or 'not detected'} -> PyTorch wheel index: {index_tag}")
+        self.progress_output.emit(f"NumPy pinned to: {numpy_version or 'unpinned'}")
+
+        if not ai_runtime.should_use_runtime():
+            return ai_runtime.build_source_plan(self.python_exe, index_tag, numpy_version), None, None
+
+        root = ai_runtime.get_install_root()
+        self.progress_output.emit(f"AI runtime folder: {root}")
+        free = ai_runtime.free_space_gb(root)
+        if free is not None and free < ai_runtime.MIN_FREE_GB:
+            raise RuntimeError(
+                f"Not enough disk space: {free:.1f} GB free, about {ai_runtime.MIN_FREE_GB} GB is needed.")
+
+        uv = ai_runtime.find_uv()
+        if uv is None:
+            self.status_changed.emit("Downloading package installer (uv)...")
+            uv = ai_runtime.download_uv(root / "bin", log=self.progress_output.emit)
+        self.progress_output.emit(f"Using uv: {uv}")
+
+        steps = ai_runtime.build_runtime_plan(uv, root, index_tag, numpy_version)
+        return steps, ai_runtime.uv_environment(root), root
+
+    def run(self):
+        self.status_changed.emit("Preparing installation...")
+        try:
+            steps, env, root = self._build_plan()
+            warnings = []
+            for step in steps:
                 if self._is_cancelled:
                     break
-                stripped = line.strip()
-                if stripped:
-                    self.progress_output.emit(stripped)
-                    if "Downloading" in stripped:
-                        parts = stripped.split()
-                        pkg = parts[1] if len(parts) > 1 else "packages"
-                        self.status_changed.emit(f"Downloading {pkg}...")
-                    elif "Installing collected packages" in stripped:
-                        self.status_changed.emit("Configuring and installing packages...")
-                    elif "Successfully installed" in stripped:
-                        self.status_changed.emit("Packages installed successfully!")
-
-            self._process.stdout.close()
-            ret_code = self._process.wait()
+                self.status_changed.emit(step.status)
+                ret_code = self._run_command(step.resolve(), env=env)
+                if self._is_cancelled:
+                    break
+                if ret_code != 0:
+                    if step.optional:
+                        warnings.append(f"{step.status.rstrip('.')} failed (exit code {ret_code}).")
+                        self.progress_output.emit(f"[warning] optional step failed, continuing.")
+                        continue
+                    self.finished.emit(False, f"{step.status.rstrip('.')} failed (exit code {ret_code}).")
+                    return
 
             if self._is_cancelled:
                 self.finished.emit(False, "Installation was cancelled by user.")
                 return
 
-            if ret_code == 0:
-                self.finished.emit(True, "PyTorch and Torchvision installed successfully!")
-            else:
-                self.finished.emit(False, f"Installation encountered an error (exit code {ret_code}).")
+            if root is not None:
+                # Free the download cache (several GB of wheels) once installed.
+                shutil.rmtree(root / "cache", ignore_errors=True)
+
+            message = "PyTorch and Torchvision installed successfully!"
+            if warnings:
+                message += " (" + " ".join(warnings) + ")"
+            self.finished.emit(True, message)
         except Exception as e:
-            self.finished.emit(False, f"Execution failed: {e}")
+            self.finished.emit(False, f"Installation failed: {e}")
 
 
 class TorchInstallDialog(QDialog):
-    def __init__(self, parent=None, gpu_name="NVIDIA GPU"):
+    def __init__(self, parent=None, gpu_name="NVIDIA GPU", driver_version=None):
         super().__init__(parent)
         self.setWindowTitle("PyTorch & CUDA Setup")
         self.resize(580, 420)
@@ -326,8 +408,10 @@ class TorchInstallDialog(QDialog):
 
         sub_label = QLabel(
             f"Configuring PyTorch with CUDA acceleration for <b>{gpu_name}</b>.<br>"
-            "This will download and install PyTorch and Torchvision. "
+            "This will download and install PyTorch and Torchvision (about 3 GB). "
             "Please keep your internet connection active."
+            + ("<br><i>Installed into the 'ai_runtime' folder beside VisionView.exe; "
+               "delete that folder to remove it.</i>" if getattr(sys, "frozen", False) else "")
         )
         sub_label.setWordWrap(True)
         sub_label.setStyleSheet("color: #444; font-size: 12px;")
@@ -391,7 +475,7 @@ class TorchInstallDialog(QDialog):
         layout.addLayout(btn_layout)
 
         # Worker thread
-        self.worker = TorchInstallWorker(parent=self)
+        self.worker = TorchInstallWorker(parent=self, driver_version=driver_version)
         self.worker.progress_output.connect(self._on_log)
         self.worker.status_changed.connect(self._on_status)
         self.worker.finished.connect(self._on_finished)
@@ -422,10 +506,24 @@ class TorchInstallDialog(QDialog):
         if success:
             self.progress_bar.setRange(0, 100)
             self.progress_bar.setValue(100)
-            self.status_label.setText("✔ " + message)
             self.status_label.setStyleSheet("font-weight: bold; font-size: 13px; color: #2e7d32;")
-            # Force refresh compatibility cache
-            check_deep_learning_support(force_refresh=True)
+            # Load the new runtime into this session, then refresh the compatibility cache
+            self.status_label.setText("Loading PyTorch into VisionView...")
+            QApplication.processEvents()
+            try:
+                from utils.ai_runtime import activate_ai_runtime
+                activate_ai_runtime()
+            except Exception as e:
+                self._on_log(f"[warning] Could not activate AI runtime: {e}")
+            is_supported, reason, details = check_deep_learning_support(force_refresh=True)
+            if is_supported:
+                device = details.get("device", "CPU")
+                message += f" AI features are ready ({device})."
+            else:
+                self._on_log(f"[info] {reason}")
+                message += " Please restart VisionView to enable AI features."
+            self.status_label.setText("✔ " + message)
+            self.status_label.setWordWrap(True)
             # Reset module list cache if present
             try:
                 import utils.process_canva as pc
@@ -526,7 +624,8 @@ def check_startup_ai_environment(parent=None, force_show=False):
             set_device_setting("startup/dont_ask_torch_setup", True)
 
         if msg_box.clickedButton() == install_btn:
-            installer = TorchInstallDialog(parent=parent, gpu_name=gpu_name)
+            installer = TorchInstallDialog(parent=parent, gpu_name=gpu_name,
+                                           driver_version=gpu_info.get("driver_version"))
             installer.exec()
             return {"status": "installer_launched"}
         return {"status": "user_cancelled"}

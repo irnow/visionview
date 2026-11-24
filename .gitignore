@@ -43,3 +43,6 @@ build/
 dist/
 .build_venv/
 *.egg-info/
+
+# Side-by-side AI runtime (torch/torchvision) created by the in-app installer
+ai_runtime/

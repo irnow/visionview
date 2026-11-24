@@ -41,6 +41,14 @@ def _startup_step(message, value):
         _startup_splash.step(message, value)
 
 
+# Make the side-by-side AI runtime (ai_runtime/ beside VisionView.exe) importable
+# before anything tries to import torch. No-op when running from source.
+from utils.ai_runtime import activate_ai_runtime
+try:
+    activate_ai_runtime()
+except Exception as e:
+    print(f"[Startup] Could not activate AI runtime: {e}")
+
 _startup_step("Loading image processing libraries...", 10)
 from utils.window_module import WindowModule, get_module_icon
 _startup_step("Loading vision modules...", 40)

@@ -59,6 +59,7 @@ hiddenimports = [
     'utils.metrology',
     'utils.process_canva',
     'utils.startup_splash',
+    'utils.ai_runtime',
     'utils.video_label',
     'utils.window_module',
     'ai_modules.rfdetr_bbox',
@@ -102,6 +103,24 @@ try:
     hiddenimports += ['supervision']
 except ImportError:
     pass
+
+# 5a. Bundle Pillow completely: torchvision (from ai_runtime/) imports PIL
+#     submodules VisionView itself never uses (ImageEnhance, ImageOps, ...), and
+#     the bundled PIL package shadows the runtime's copy.
+from PyInstaller.utils.hooks import collect_submodules
+hiddenimports += collect_submodules('PIL')
+
+# 5b. Bundle uv (package installer) so the app can build its side-by-side AI
+#     runtime (torch/torchvision) on the user's machine. See utils/ai_runtime.py.
+import shutil
+uv_exe = os.path.join(base_dir, 'tools', 'uv.exe' if sys.platform.startswith('win') else 'uv')
+if not os.path.exists(uv_exe):
+    uv_exe = shutil.which('uv')
+if uv_exe:
+    binaries.append((uv_exe, '.'))
+    print(f"[SPEC] Bundling uv from: {uv_exe}")
+else:
+    print("[SPEC WARNING] uv not found; the app will download it on first AI install.")
 
 # 6. Exclude bulky training/scientific packages not required at runtime
 excludes = [
@@ -156,6 +175,38 @@ a = Analysis(
     cipher=block_cipher,
     noarchive=False,
 )
+
+# 7. Windows: ship a current Microsoft Visual C++ runtime.
+#    The build Python drags in an old MSVCP140/VCRUNTIME140 (e.g. 14.27 from 2020).
+#    PyTorch 2.x (installed later into ai_runtime/) fails with
+#    "WinError 1114 ... c10.dll" against such an old runtime, so replace the
+#    top-level copies with the build machine's System32 versions (VC++ redist)
+#    and add the newer runtime DLLs torch needs, for PCs without a recent redist.
+if sys.platform.startswith('win'):
+    _sys32 = os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'System32')
+    _vc_runtime = {
+        'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_2.dll', 'msvcp140_atomic_wait.dll',
+        'msvcp140_codecvt_ids.dll', 'vcruntime140.dll', 'vcruntime140_1.dll',
+        'vcruntime140_threads.dll', 'concrt140.dll',
+    }
+    _replaced, _new_binaries = set(), []
+    for _entry in a.binaries:
+        _dest, _src, _kind = _entry[0], _entry[1], _entry[2]
+        _name = os.path.basename(_dest).lower()
+        if os.path.dirname(_dest) == '' and _name in _vc_runtime:
+            _sys_copy = os.path.join(_sys32, _name)
+            if os.path.exists(_sys_copy):
+                _new_binaries.append((_dest, _sys_copy, _kind))
+                _replaced.add(_name)
+                continue
+        _new_binaries.append(_entry)
+    for _name in sorted(_vc_runtime - _replaced):
+        _sys_copy = os.path.join(_sys32, _name)
+        if os.path.exists(_sys_copy):
+            _new_binaries.append((_name, _sys_copy, 'BINARY'))
+            _replaced.add(_name)
+    a.binaries = _new_binaries
+    print(f"[SPEC] Using System32 MSVC runtime for: {', '.join(sorted(_replaced))}")
 
 pyz = PYZ(
     a.pure,

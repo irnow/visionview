@@ -3,13 +3,13 @@
   "1": "rfdetr_bbox.py",
   "2": "WindowModule",
   "3": "cv2",
-  "4": "NodeBlock",
+  "4": "device_compatibility.py",
   "5": "VideoLabel",
   "6": "NodeCanvas",
   "7": "process_canva.py",
   "8": "steps",
   "9": "ParameterDialog",
-  "10": "ProcessWindow",
+  "10": "ai_runtime.py",
   "11": "Basler",
   "12": "VisionView",
   "13": "DirectoryViewer",
@@ -26,10 +26,8 @@
   "24": ".map_to_real",
   "25": ".contextMenuEvent",
   "26": "CalibrationDialog",
-  "27": "ModuleList",
+  "27": "optical_character_recognition.py",
   "28": "CameraInitDialog",
   "29": "ToggleSwitch",
-  "30": "DraggableListWidget",
-  "31": "NodeConnection",
-  "32": ".delete_selected_items"
+  "31": "QDialog"
 }

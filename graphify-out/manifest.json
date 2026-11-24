@@ -168,9 +168,9 @@
     "semantic_hash": ""
   },
   "main.py": {
-    "mtime": 1795489141.1195576,
-    "seen": 1795489176.2530165,
-    "ast_hash": "3685af31b1fe753c11b7f0007bbbf4dc",
+    "mtime": 1795506486.8926706,
+    "seen": 1795506693.878864,
+    "ast_hash": "3d7d10ad9b6e200f2f3a5e2b530fe466",
     "semantic_hash": ""
   },
   "report.json": {
@@ -198,9 +198,9 @@
     "semantic_hash": ""
   },
   "utils/device_compatibility.py": {
-    "mtime": 1794968899.053785,
-    "seen": 1795488340.5195553,
-    "ast_hash": "f0bdb9e20f2649ad94216036fc2dc8f3",
+    "mtime": 1795512379.043701,
+    "seen": 1795512792.627609,
+    "ast_hash": "e36b595ed7f23c0ecaf3d7bcc2e11982",
     "semantic_hash": ""
   },
   "utils/directory_viewer.py": {
@@ -291,6 +291,12 @@
     "mtime": 1795489127.3242056,
     "seen": 1795489176.2530305,
     "ast_hash": "976d378d86fb67047f685b38cff25aff",
+    "semantic_hash": ""
+  },
+  "utils/ai_runtime.py": {
+    "mtime": 1795512538.882255,
+    "seen": 1795512792.6276052,
+    "ast_hash": "ab8aca10d4c307e16c72cfd2d9fa037f",
     "semantic_hash": ""
   }
 }
