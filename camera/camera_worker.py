@@ -4,6 +4,7 @@ import importlib
 import time
 import cv2 
 from collections import deque
+from utils.split_view import compose_split_view
 
 _CV_MODULE_CACHE = {}
 
@@ -26,6 +27,9 @@ class CameraWorker(QObject):
         self.camera_object = camera_object # Class
         self.camera_instance = camera_instance # Device Info
         self.pipeline = []
+        self.pipeline_enabled = True
+        self.split_view = False
+        self.split_view_mode = "side_by_side"
         self._running = True
         self.frame_times = deque(maxlen=30)
         self._last_fps_emit_time = 0.0
@@ -40,7 +44,8 @@ class CameraWorker(QObject):
             while self._running:
                 img = self.camera_object.image()
                 if img is not None: # Only emit if actually got an image
-                    if self.pipeline:
+                    raw_img = img.copy() if getattr(self, 'split_view', False) else None
+                    if getattr(self, 'pipeline_enabled', True) and self.pipeline:
                         for step in list(self.pipeline):
                             module_name = step.get('name', '')
                             params = step.get('params', {})
@@ -52,7 +57,12 @@ class CameraWorker(QObject):
                                 print(f"Pipeline Error ({module_name}): {e}")
                     else:
                         # Decouple from camera converter internal buffer if no filter produced a new array
-                        img = img.copy()
+                        img = raw_img if raw_img is not None else img.copy()
+
+                    if getattr(self, 'split_view', False) and raw_img is not None:
+                        mode = getattr(self, 'split_view_mode', 'side_by_side')
+                        is_enabled = getattr(self, 'pipeline_enabled', True)
+                        img = compose_split_view(raw_img, img, mode=mode, pipeline_enabled=is_enabled)
 
                     current_time = time.perf_counter()
                     dt = current_time - last_time

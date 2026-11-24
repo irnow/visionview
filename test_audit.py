@@ -10,6 +10,9 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt, QPoint, QPointF
 from PySide6.QtGui import QMouseEvent, QPixmap
 
+# Ensure headless test mode so startup dialogs don't block
+os.environ["VISIONVIEW_HEADLESS_TEST"] = "1"
+
 # Ensure clean app instance
 app = QApplication.instance()
 if not app:
@@ -936,7 +939,7 @@ def test_device_compatibility_and_ai_fallback():
         dev_comp.show_unsupported_feature_popup = orig_popup
         if orig_pc_popup:
             pc_mod.show_unsupported_feature_popup = orig_pc_popup
-        os.environ.pop("VISIONVIEW_HEADLESS_TEST", None)
+        os.environ["VISIONVIEW_HEADLESS_TEST"] = "1"
         os.environ.pop("VISIONVIEW_FORCE_NO_TORCH", None)
         check_deep_learning_support(force_refresh=True)
         proc_win.close()
@@ -1612,6 +1615,256 @@ def test_module_indexing_and_performance():
     win.close()
     print("  -> Module sequential indexing and performance test passed!")
 
+def test_startup_ai_environment_scan_and_install_flow():
+    print("Testing startup GPU hardware scan, Torch setup, and popup options...")
+    from utils.device_compatibility import (
+        detect_gpu_hardware,
+        get_device_setting,
+        set_device_setting,
+        check_startup_ai_environment,
+        TorchInstallWorker,
+        TorchInstallDialog
+    )
+
+    # 1. Test hardware GPU detection
+    gpu_info = detect_gpu_hardware()
+    assert isinstance(gpu_info, dict)
+    assert "has_gpu" in gpu_info
+    assert "has_nvidia" in gpu_info
+    assert "nvidia_gpus" in gpu_info
+    assert "all_gpus" in gpu_info
+    print(f"  -> Detected system hardware: has_nvidia={gpu_info['has_nvidia']}, gpus={gpu_info['all_gpus']}")
+
+    # 2. Test settings persistence
+    orig_torch_pref = get_device_setting("startup/dont_ask_torch_setup", False)
+    orig_gpu_pref = get_device_setting("startup/dont_ask_no_gpu_warning", False)
+
+    set_device_setting("startup/dont_ask_torch_setup", True)
+    assert get_device_setting("startup/dont_ask_torch_setup", False) is True
+
+    set_device_setting("startup/dont_ask_torch_setup", False)
+    assert get_device_setting("startup/dont_ask_torch_setup", True) is False
+
+    # Restore original settings
+    set_device_setting("startup/dont_ask_torch_setup", orig_torch_pref)
+    set_device_setting("startup/dont_ask_no_gpu_warning", orig_gpu_pref)
+    print("  -> Persistent 'Don't ask again next time' setting read/write verified!")
+
+    # 3. Test check_startup_ai_environment under headless test mode
+    os.environ["VISIONVIEW_HEADLESS_TEST"] = "1"
+    res = check_startup_ai_environment(parent=None)
+    assert res.get("status") == "headless_bypass"
+    print("  -> Headless test bypass verified!")
+
+    # 4. Test simulate Case A: Device has GPU, Torch not detected
+    os.environ["VISIONVIEW_FORCE_NO_TORCH"] = "1"
+    os.environ["VISIONVIEW_FORCE_GPU_NAME"] = "NVIDIA GeForce RTX 3060 Laptop GPU"
+    os.environ.pop("VISIONVIEW_FORCE_NO_GPU", None)
+    gpu_sim = detect_gpu_hardware()
+    assert gpu_sim["has_nvidia"] is True
+    assert "RTX 3060" in gpu_sim["nvidia_gpus"][0]
+    print("  -> Case A (GPU present, Torch missing) hardware simulation verified!")
+
+    # 5. Test simulate Case B: Device has no GPU
+    os.environ["VISIONVIEW_FORCE_NO_GPU"] = "1"
+    os.environ.pop("VISIONVIEW_FORCE_GPU_NAME", None)
+    gpu_sim_none = detect_gpu_hardware()
+    assert gpu_sim_none["has_nvidia"] is False
+    assert gpu_sim_none["has_gpu"] is False
+    print("  -> Case B (No GPU found) hardware simulation verified!")
+
+    # Clean environment overrides
+    os.environ.pop("VISIONVIEW_FORCE_NO_GPU", None)
+    os.environ.pop("VISIONVIEW_FORCE_NO_TORCH", None)
+    os.environ.pop("VISIONVIEW_FORCE_GPU_NAME", None)
+
+    # 6. Test TorchInstallWorker command assembly
+    worker = TorchInstallWorker(python_exe="python.exe")
+    assert worker.python_exe == "python.exe"
+    print("  -> TorchInstallWorker structure verified!")
+    print("  -> Startup AI environment scan and install flow tests passed successfully!")
+
+def test_cv_pipeline_toggle_switch():
+    print("\nTesting Computer Vision Modules toggle switch ON/OFF bypass...")
+    from utils.process_canva import ProcessWindow, NodeBlock, ToggleSwitch
+    from utils.window_module import WindowModule
+    from camera.image_worker import ImageWorker
+    from main import VisionApp
+    import numpy as np
+
+    win = VisionApp()
+    win.show()
+    QApplication.processEvents()
+
+    win.create_new_module()
+    mod = win.modules[0]
+    pw = mod.process_window
+    assert pw is not None
+    assert hasattr(pw.module_list, 'toggle_switch')
+    toggle = pw.module_list.toggle_switch
+    assert isinstance(toggle, ToggleSwitch)
+    assert toggle.isChecked() is True, "Toggle should be ON by default"
+    assert "ON" in toggle.toolTip()
+    assert pw.canvas.pipeline_enabled is True
+    assert mod.pipeline_enabled is True
+    if mod.worker:
+        assert mod.worker.pipeline_enabled is True
+    print("  -> Initial ON state verified across canvas, module, and worker!")
+
+    # Add a Canny Edge filter block
+    canny_block = NodeBlock("Canny Edge Detection")
+    pw.canvas.scene.addItem(canny_block)
+    canny_block.setPos(100, 0)
+    pw.canvas.auto_connect_pipeline()
+    seq = pw.canvas.get_pipeline_sequence()
+    assert len(seq) == 1
+    assert seq[0]["name"] == "Canny Edge Detection"
+    if mod.worker:
+        assert len(mod.worker.pipeline) == 1
+    print("  -> Node block connected and synced to worker pipeline!")
+
+    # Test ImageWorker processing with pipeline_enabled = True vs False
+    dummy_img = np.full((100, 100, 3), 128, dtype=np.uint8)
+    cv2.rectangle(dummy_img, (20, 20), (80, 80), (255, 255, 255), -1)
+
+    worker = ImageWorker(dummy_img)
+    worker.pipeline = [{"name": "Canny Edge Detection", "params": {"threshold1": 50, "threshold2": 150}}]
+    assert worker.pipeline_enabled is True
+    filtered_frames = []
+    def on_filtered(f, w, h):
+        filtered_frames.append(f)
+        worker._running = False
+    worker.image_ready.connect(on_filtered)
+    worker.process()
+    assert len(filtered_frames) == 1
+    out_filtered = filtered_frames[-1]
+
+    # Now toggle switch OFF
+    toggle.setChecked(False)
+    assert toggle.isChecked() is False
+    assert "OFF" in toggle.toolTip()
+    assert pw.canvas.pipeline_enabled is False
+    assert mod.pipeline_enabled is False
+    if mod.worker:
+        assert mod.worker.pipeline_enabled is False
+        assert mod.worker.pipeline == []
+    print("  -> Toggled OFF: worker pipeline bypassed to empty list and pipeline_enabled is False!")
+
+    # Verify worker ignores pipeline when pipeline_enabled is False
+    raw_frames = []
+    worker._running = True
+    worker.pipeline_enabled = False
+    worker.image_ready.disconnect()
+    def on_raw(f, w, h):
+        raw_frames.append(f)
+        worker._running = False
+    worker.image_ready.connect(on_raw)
+    worker.process()
+    assert len(raw_frames) == 1
+    out_raw = raw_frames[-1]
+    assert np.array_equal(out_raw, dummy_img), "When pipeline_enabled is False, image must be emitted raw without modification"
+    print("  -> ImageWorker successfully bypassed filter pipeline and emitted raw frame!")
+
+    # Now toggle switch back ON
+    toggle.setChecked(True)
+    assert toggle.isChecked() is True
+    assert "ON" in toggle.toolTip()
+    assert pw.canvas.pipeline_enabled is True
+    assert mod.pipeline_enabled is True
+    if mod.worker:
+        assert mod.worker.pipeline_enabled is True
+        assert len(mod.worker.pipeline) == 1
+    print("  -> Toggled ON: worker pipeline restored with active sequence!")
+
+    win.remove_module(mod)
+    win.close()
+    print("  -> Computer Vision Modules toggle switch test passed successfully!")
+
+def test_split_view_raw_and_processed():
+    print("\nTesting Split View Option (Raw and Processed View)...")
+    from utils.split_view import compose_split_view
+    from utils.window_module import WindowModule
+    from camera.image_worker import ImageWorker
+    from main import VisionApp
+    from PySide6.QtGui import QAction
+
+    # 1. Test compose_split_view mathematical properties and modes
+    raw = np.full((100, 150, 3), 50, dtype=np.uint8)
+    proc = raw.copy()
+    cv2.rectangle(proc, (30, 30), (120, 80), (255, 0, 0), -1)
+
+    # Mode A: side_by_side
+    sbs = compose_split_view(raw, proc, mode="side_by_side")
+    assert sbs.shape == (100, 300, 3), f"Expected (100, 300, 3), got {sbs.shape}"
+    # Mode B: curtain
+    curt = compose_split_view(raw, proc, mode="curtain", split_ratio=0.5)
+    assert curt.shape == (100, 150, 3), f"Expected (100, 150, 3), got {curt.shape}"
+    # Mode C: top_bottom
+    tb = compose_split_view(raw, proc, mode="top_bottom")
+    assert tb.shape == (200, 150, 3), f"Expected (200, 150, 3), got {tb.shape}"
+    print("  -> compose_split_view modes (side_by_side, curtain, top_bottom) verified!")
+
+    # 2. Test ImageWorker split view emission
+    worker = ImageWorker(raw)
+    worker.pipeline = [{"name": "Threshold", "params": {"threshold": 128, "maxval": 255}}]
+    worker.split_view = True
+    worker.split_view_mode = "side_by_side"
+
+    emitted_frames = []
+    def on_img(f, w, h):
+        emitted_frames.append((f, w, h))
+        worker._running = False
+    worker.image_ready.connect(on_img)
+    worker.process()
+    assert len(emitted_frames) == 1
+    f_split, w_split, h_split = emitted_frames[0]
+    assert w_split == 300 and h_split == 100
+    assert f_split.shape == (100, 300, 3)
+    print("  -> ImageWorker split view emission verified with (100, 300, 3) composed output!")
+
+    # 3. Test WindowModule and GUI integration
+    win = VisionApp()
+    win.show()
+    QApplication.processEvents()
+
+    win.create_new_module()
+    mod = win.modules[0]
+    assert hasattr(mod, 'btn_split_view'), "WindowModule missing btn_split_view in header"
+    assert mod.split_view_enabled is False
+
+    # Toggle split view ON via module header button
+    mod.btn_split_view.click()
+    assert mod.split_view_enabled is True
+    assert "#0078d4" in mod.btn_split_view.styleSheet()
+    assert "ON" in mod.btn_split_view.toolTip()
+    assert win.action_split_view.isChecked() is True
+    print("  -> Module header Split View button toggled ON verified!")
+
+    # Test top menu action toggling split view OFF
+    win.action_split_view.trigger()
+    assert mod.split_view_enabled is False
+    assert "#555" in mod.btn_split_view.styleSheet()
+    assert win.action_split_view.isChecked() is False
+    print("  -> Main window View menu Split View action toggled OFF verified!")
+
+    # Test mode change via set_split_view
+    mod.set_split_view(True, mode="curtain")
+    assert mod.split_view_enabled is True
+    assert mod.split_view_mode == "curtain"
+    assert win.act_mode_curt.isChecked() is True
+    print("  -> Split View mode switching verified!")
+
+    # Test Process Editor Split View button
+    pw = mod.process_window
+    assert hasattr(pw.module_list, 'btn_split_view')
+    pw.module_list.btn_split_view.click()
+    assert mod.split_view_enabled is False
+    print("  -> Process Editor panel Split View button toggle verified!")
+
+    win.remove_module(mod)
+    win.close()
+    print("  -> Split View option tests passed successfully!")
+
 if __name__ == "__main__":
     test_imports()
     test_filters()
@@ -1633,4 +1886,8 @@ if __name__ == "__main__":
     test_crop_and_template_drag_dropdowns()
     test_issues_resolution()
     test_module_indexing_and_performance()
+    test_startup_ai_environment_scan_and_install_flow()
+    test_cv_pipeline_toggle_switch()
+    test_split_view_raw_and_processed()
     print("\nALL AUDIT AND FEATURE TESTS PASSED SUCCESSFULLY!")
+    sys.exit(0)

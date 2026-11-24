@@ -7,10 +7,10 @@ from PySide6.QtWidgets import (
     QGraphicsRectItem, QGraphicsTextItem,
     QGraphicsEllipseItem, QGraphicsPathItem,
     QGraphicsProxyWidget, QGraphicsItem, QPushButton,
-    QMenu, QToolButton
+    QMenu, QToolButton, QCheckBox
 )
 
-from PySide6.QtGui import QColor, QPainter, QPen, QPainterPath, QDrag
+from PySide6.QtGui import QColor, QPainter, QPen, QPainterPath, QDrag, QBrush
 from PySide6.QtCore import Qt, QPointF, QMimeData
 
 from computer_vision.parameter_dialog import ParameterDialog
@@ -52,9 +52,14 @@ class ProcessWindow(QWidget):
     def send_to_worker(self):
         if self.window_module and self.window_module.worker:
             sequence = self.canvas.get_pipeline_sequence()
-            # Directly update the worker's pipeline list
-            self.window_module.worker.pipeline = sequence
-            print(f"Worker pipeline updated: {sequence}")
+            is_enabled = getattr(self.canvas, 'pipeline_enabled', True)
+            self.window_module.pipeline_enabled = is_enabled
+            self.window_module.worker.pipeline_enabled = is_enabled
+            if is_enabled:
+                self.window_module.worker.pipeline = sequence
+            else:
+                self.window_module.worker.pipeline = []
+            print(f"Worker pipeline updated: {self.window_module.worker.pipeline} (enabled={is_enabled})")
 
     def closeEvent(self, event):
         # Tell the parent module to save the current canvas state
@@ -98,6 +103,7 @@ class NodeCanvas(QGraphicsView):
         self.setAcceptDrops(True)
 
         self.temp_line = None
+        self.pipeline_enabled = True
 
         self.create_default_nodes()
 
@@ -396,13 +402,33 @@ class NodeCanvas(QGraphicsView):
                 
         return sequence
 
+    def set_pipeline_enabled(self, enabled):
+        self.pipeline_enabled = enabled
+        proc_win = getattr(self, 'process_window', None)
+        if proc_win is None and callable(getattr(self, 'window', None)):
+            proc_win = self.window()
+        if hasattr(proc_win, 'window_module') and proc_win.window_module:
+            proc_win.window_module.pipeline_enabled = enabled
+            if proc_win.window_module.worker:
+                proc_win.window_module.worker.pipeline_enabled = enabled
+                if enabled:
+                    proc_win.window_module.worker.pipeline = self.get_pipeline_sequence()
+                else:
+                    proc_win.window_module.worker.pipeline = []
+                print(f"Pipeline enabled toggled to: {enabled}")
+
     def push_live_pipeline(self):
         sequence = self.get_pipeline_sequence()
         proc_win = getattr(self, 'process_window', None)
         if proc_win is None and callable(getattr(self, 'window', None)):
             proc_win = self.window()
         if hasattr(proc_win, 'window_module') and proc_win.window_module and proc_win.window_module.worker:
-            proc_win.window_module.worker.pipeline = sequence
+            is_enabled = getattr(self, 'pipeline_enabled', True)
+            proc_win.window_module.worker.pipeline_enabled = is_enabled
+            if is_enabled:
+                proc_win.window_module.worker.pipeline = sequence
+            else:
+                proc_win.window_module.worker.pipeline = []
 
     def get_save_data(self):
         """Returns a list of dictionaries containing node positions, titles and parameters."""
@@ -538,6 +564,61 @@ def get_cached_cv_modules():
     _CV_MODULES_CACHE = modules_to_add
     return _CV_MODULES_CACHE
 
+class ToggleSwitch(QCheckBox):
+    """
+    Modern iOS-style slider toggle switch widget for enabling / disabling
+    computer vision module pipeline processing.
+    """
+    def __init__(self, parent=None, checked=True):
+        super().__init__(parent)
+        self.setChecked(checked)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedSize(44, 22)
+        self.setText("")
+        self._update_tooltip()
+        self.toggled.connect(self._on_toggled)
+
+    def _on_toggled(self, checked):
+        self._update_tooltip()
+        self.update()
+
+    def _update_tooltip(self):
+        if self.isChecked():
+            self.setToolTip("Computer Vision Processing: ON\n(Click to bypass all CV modules and show raw feed)")
+        else:
+            self.setToolTip("Computer Vision Processing: OFF (Bypassed)\n(Click to enable CV modules processing)")
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        w = self.width()
+        h = self.height()
+        radius = h / 2.0
+
+        # Background track
+        if self.isChecked():
+            track_color = QColor("#0078d4") # Active blue
+        else:
+            track_color = QColor("#555555") # Inactive grey
+
+        painter.setBrush(QBrush(track_color))
+        painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(0, 0, w, h, radius, radius)
+
+        # Thumb circle
+        thumb_dia = h - 6
+        thumb_y = 3
+        if self.isChecked():
+            thumb_x = w - thumb_dia - 3
+        else:
+            thumb_x = 3
+
+        painter.setBrush(QBrush(QColor("#ffffff")))
+        painter.drawEllipse(thumb_x, thumb_y, thumb_dia, thumb_dia)
+        painter.end()
+
+
 # List of CV modules on right panel
 class ModuleList(QWidget):
     def __init__(self, canvas):
@@ -548,10 +629,38 @@ class ModuleList(QWidget):
         layout = QVBoxLayout(self)
         self.setLayout(layout)
 
-        # Header
+        # Header with Title and Toggle Switch
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(8)
+
         self.label = QLabel("Computer Vision Modules")
         self.label.setStyleSheet("font-weight:bold; font-size:14px;")
-        layout.addWidget(self.label)
+        header_layout.addWidget(self.label)
+
+        header_layout.addStretch()
+
+        init_enabled = True
+        proc_win = getattr(canvas, 'process_window', None)
+        if proc_win and hasattr(proc_win, 'window_module') and proc_win.window_module:
+            init_enabled = getattr(proc_win.window_module, 'pipeline_enabled', True)
+
+        self.toggle_switch = ToggleSwitch(self, checked=init_enabled)
+        self.toggle_switch.toggled.connect(self.on_processing_toggled)
+        header_layout.addWidget(self.toggle_switch)
+
+        # Split View button in process editor
+        init_split = False
+        if proc_win and hasattr(proc_win, 'window_module') and proc_win.window_module:
+            init_split = getattr(proc_win.window_module, 'split_view_enabled', False)
+
+        self.btn_split_view = QPushButton("Split View")
+        self.btn_split_view.setCursor(Qt.PointingHandCursor)
+        self.btn_split_view.clicked.connect(self.on_split_view_clicked)
+        self.update_split_view_btn(init_split)
+        header_layout.addWidget(self.btn_split_view)
+
+        layout.addLayout(header_layout)
 
         # List widget
         self.list_widget = DraggableListWidget(self)
@@ -561,8 +670,54 @@ class ModuleList(QWidget):
 
         self.load_modules()
 
+    def on_processing_toggled(self, checked):
+        if hasattr(self.canvas, 'set_pipeline_enabled'):
+            self.canvas.set_pipeline_enabled(checked)
+
+    def on_split_view_clicked(self):
+        proc_win = getattr(self.canvas, 'process_window', None)
+        if proc_win and hasattr(proc_win, 'window_module') and proc_win.window_module:
+            mod = proc_win.window_module
+            mod.toggle_split_view()
+            self.update_split_view_btn(mod.split_view_enabled)
+
+    def update_split_view_btn(self, is_enabled):
+        if is_enabled:
+            self.btn_split_view.setStyleSheet("""
+                QPushButton {
+                    background-color: #0078d4;
+                    color: #ffffff;
+                    border: 1px solid #00a2ed;
+                    border-radius: 3px;
+                    padding: 2px 7px;
+                    font-size: 11px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #0086ea;
+                }
+            """)
+            self.btn_split_view.setToolTip("Split View: ON (Raw & Processed) - Click to restore single view")
+        else:
+            self.btn_split_view.setStyleSheet("""
+                QPushButton {
+                    background-color: #3a3a3a;
+                    color: #e0e0e0;
+                    border: 1px solid #555555;
+                    border-radius: 3px;
+                    padding: 2px 7px;
+                    font-size: 11px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #4a4a4a;
+                }
+            """)
+            self.btn_split_view.setToolTip("Toggle Split View (Raw & Processed View)")
+
     def load_modules(self):
         """Load modules from the folder sorted alphabetically (cached)"""
+        self.list_widget.clear()
         modules_to_add = get_cached_cv_modules()
 
         ai_supported, ai_reason, _ = check_deep_learning_support()

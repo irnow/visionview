@@ -434,6 +434,8 @@ class ParameterDialog(QDialog):
         """Locates the active WindowModule from parent tree or application windows"""
         curr = self.parent()
         while curr is not None:
+            if hasattr(curr, 'start_crop_drag') and hasattr(curr, 'label'):
+                return curr
             if hasattr(curr, 'window_module') and curr.window_module is not None:
                 return curr.window_module
             if hasattr(curr, 'active_module') and curr.active_module is not None:

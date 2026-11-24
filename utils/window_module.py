@@ -77,6 +77,9 @@ class WindowModule(QFrame):
 
         self.process_window = None  # Store the window instance here
         self.saved_nodes = []       # Store node data (title, x, y)
+        self.pipeline_enabled = True
+        self.split_view_enabled = False
+        self.split_view_mode = "side_by_side"
 
         self.gui()
 
@@ -106,6 +109,16 @@ class WindowModule(QFrame):
         header_layout.addWidget(self.title_label)
         
         header_layout.addStretch()
+
+        # Split View Button (Raw vs Processed)
+        self.btn_split_view = QPushButton()
+        self.btn_split_view.setIcon(get_module_icon("vertical_split", "white"))
+        self.btn_split_view.setIconSize(QSize(15, 15))
+        self.btn_split_view.setToolTip("Toggle Split View (Raw & Processed)")
+        self.btn_split_view.setFixedSize(26, 22)
+        self.btn_split_view.setStyleSheet("background: #555; border: 1px solid #777; border-radius: 2px;")
+        self.btn_split_view.clicked.connect(self.toggle_split_view)
+        header_layout.addWidget(self.btn_split_view)
 
         # 2. Enlarge/Minimize Button (Panel Canvas)
         self.btn_enlarge = QPushButton()
@@ -217,6 +230,25 @@ class WindowModule(QFrame):
         if self.calibration.get('is_calibrated', False):
             reset_calib = context_menu.addAction("Reset Calibration (Use px)")
 
+        context_menu.addSeparator()
+
+        split_action = context_menu.addAction("Split View (Raw & Processed)")
+        split_action.setCheckable(True)
+        split_action.setChecked(self.split_view_enabled)
+
+        split_mode_menu = context_menu.addMenu("Split View Mode")
+        act_sbs = split_mode_menu.addAction("Side by Side (Horizontal)")
+        act_sbs.setCheckable(True)
+        act_sbs.setChecked(self.split_view_mode == "side_by_side")
+
+        act_curt = split_mode_menu.addAction("Curtain / Split Screen (Swipe)")
+        act_curt.setCheckable(True)
+        act_curt.setChecked(self.split_view_mode == "curtain")
+
+        act_tb = split_mode_menu.addAction("Top / Bottom (Vertical)")
+        act_tb.setCheckable(True)
+        act_tb.setChecked(self.split_view_mode == "top_bottom")
+
         context_menu.setStyleSheet(
             "background: white; \
             color: black; \
@@ -253,6 +285,54 @@ class WindowModule(QFrame):
             elif hasattr(self.label, 'cancel_polygon'):
                 self.label.cancel_polygon()
             self.label.update()
+
+        elif action == split_action:
+            self.set_split_view(split_action.isChecked())
+
+        elif action == act_sbs:
+            self.set_split_view(True, mode="side_by_side")
+
+        elif action == act_curt:
+            self.set_split_view(True, mode="curtain")
+
+        elif action == act_tb:
+            self.set_split_view(True, mode="top_bottom")
+
+    def toggle_split_view(self):
+        """Toggles split view (raw and processed view comparison) ON/OFF"""
+        self.set_split_view(not self.split_view_enabled)
+
+    def set_split_view(self, enabled: bool, mode: str = None):
+        """Sets split view enabled state and optional display mode ('side_by_side', 'curtain', 'top_bottom')"""
+        self.split_view_enabled = bool(enabled)
+        if mode:
+            self.split_view_mode = mode
+
+        # Update button styling
+        if hasattr(self, 'btn_split_view') and self.btn_split_view:
+            if self.split_view_enabled:
+                self.btn_split_view.setStyleSheet("background: #0078d4; border: 1px solid #00a2ed; border-radius: 2px;")
+                mode_str = self.split_view_mode.replace('_', ' ').title()
+                self.btn_split_view.setToolTip(f"Split View: ON ({mode_str})\n(Click to restore single processed view)")
+            else:
+                self.btn_split_view.setStyleSheet("background: #555; border: 1px solid #777; border-radius: 2px;")
+                self.btn_split_view.setToolTip("Toggle Split View (Raw & Processed)")
+
+        # Sync to running worker
+        if self.worker:
+            self.worker.split_view = self.split_view_enabled
+            self.worker.split_view_mode = self.split_view_mode
+
+        print(f"Module {self.index}: Split view set to {self.split_view_enabled} (mode={self.split_view_mode})")
+
+        # Sync with main window actions if this is active module
+        if hasattr(self.main_window, 'update_split_view_action_state'):
+            self.main_window.update_split_view_action_state(self)
+
+        # Sync with process window if open
+        if hasattr(self, 'process_window') and self.process_window:
+            if hasattr(self.process_window, 'module_list') and hasattr(self.process_window.module_list, 'update_split_view_btn'):
+                self.process_window.module_list.update_split_view_btn(self.split_view_enabled)
 
     def is_camera(self):
         dialog = CameraInitDialog(self)
@@ -384,6 +464,12 @@ class WindowModule(QFrame):
 
         self.thread = QThread()
         self.worker = CameraWorker(camera_obj, camera_instance)
+        self.worker.pipeline_enabled = getattr(self, 'pipeline_enabled', True)
+        self.worker.split_view = getattr(self, 'split_view_enabled', False)
+        self.worker.split_view_mode = getattr(self, 'split_view_mode', 'side_by_side')
+        if hasattr(self, 'process_window') and self.process_window and hasattr(self.process_window, 'canvas'):
+            if getattr(self, 'pipeline_enabled', True):
+                self.worker.pipeline = self.process_window.canvas.get_pipeline_sequence()
         self.worker.moveToThread(self.thread)
 
         # Connect Signals
@@ -423,6 +509,12 @@ class WindowModule(QFrame):
 
         self.thread = QThread()
         self.worker = ImageWorker(img)
+        self.worker.pipeline_enabled = getattr(self, 'pipeline_enabled', True)
+        self.worker.split_view = getattr(self, 'split_view_enabled', False)
+        self.worker.split_view_mode = getattr(self, 'split_view_mode', 'side_by_side')
+        if hasattr(self, 'process_window') and self.process_window and hasattr(self.process_window, 'canvas'):
+            if getattr(self, 'pipeline_enabled', True):
+                self.worker.pipeline = self.process_window.canvas.get_pipeline_sequence()
         self.worker.moveToThread(self.thread)
 
         self.thread.started.connect(self.worker.process)

@@ -58,6 +58,7 @@ hiddenimports = [
     'utils.gui_signal',
     'utils.metrology',
     'utils.process_canva',
+    'utils.startup_splash',
     'utils.video_label',
     'utils.window_module',
     'ai_modules.rfdetr_bbox',

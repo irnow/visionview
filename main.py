@@ -5,19 +5,8 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QMenu, QMenuBar, QStackedWidget, QSplitter,
                              QToolBar, QLineEdit, QFileDialog, QToolButton,
                              QDockWidget, QMessageBox)
-from PySide6.QtCore import Qt, Slot, QSize
+from PySide6.QtCore import Qt, Slot, QSize, QTimer
 from PySide6.QtGui import QAction, QIcon, QActionGroup, QKeySequence
-
-from utils.window_module import WindowModule, get_module_icon
-from utils.process_canva import ProcessWindow, get_cached_cv_modules
-from utils.gui_signal import gui_signal
-from utils.directory_viewer import DirectoryViewer
-from camera import *
-
-try:
-    from qt_material_icons import MaterialIcon
-except ImportError:
-    MaterialIcon = lambda name: QIcon()
 
 if getattr(sys, 'frozen', False):
     BUNDLE_DIR = Path(getattr(sys, '_MEIPASS', Path(sys.executable).resolve().parent))
@@ -31,6 +20,41 @@ else:
 ICON_DIR = BASE_DIR / "icons"
 ARROW_UP_PATH = (ICON_DIR / "arrow_up.png").as_posix()
 ARROW_DOWN_PATH = (ICON_DIR / "arrow_down.png").as_posix()
+
+# ------------------------------------------------------------------------------
+# Startup loading popup: when launched as the app, show it *before* the heavy
+# imports below (OpenCV, camera SDKs, PyTorch) so the user knows to wait.
+# When main.py is imported (e.g. by tests), no splash is created.
+# ------------------------------------------------------------------------------
+_startup_app = None
+_startup_splash = None
+if __name__ == "__main__":
+    from utils.startup_splash import StartupSplash
+    _startup_app = QApplication(sys.argv)
+    _startup_splash = StartupSplash(icon_path=ICON_DIR / "app_icon.ico")
+    _startup_splash.show()
+    _startup_splash.step("Starting VisionView...", 5)
+
+
+def _startup_step(message, value):
+    if _startup_splash is not None:
+        _startup_splash.step(message, value)
+
+
+_startup_step("Loading image processing libraries...", 10)
+from utils.window_module import WindowModule, get_module_icon
+_startup_step("Loading vision modules...", 40)
+from utils.process_canva import ProcessWindow, get_cached_cv_modules
+from utils.gui_signal import gui_signal
+from utils.directory_viewer import DirectoryViewer
+from utils.device_compatibility import check_startup_ai_environment, check_deep_learning_support
+_startup_step("Loading camera drivers...", 50)
+from camera import *
+
+try:
+    from qt_material_icons import MaterialIcon
+except ImportError:
+    MaterialIcon = lambda name: QIcon()
 
 CHECKBOX_STYLESHEET = """
 QCheckBox {
@@ -235,11 +259,15 @@ class VisionApp(QMainWindow):
         except Exception:
             pass
 
+        # Check GPU hardware and PyTorch environment at startup
+        QTimer.singleShot(400, lambda: check_startup_ai_environment(parent=self))
+
     def setup_menu(self):
         menubar = self.menuBar()
         self.view_menu = menubar.addMenu("View")
         self.tools_menu = menubar.addMenu("Tools")
-        menubar.addMenu("Help")
+        self.help_menu = menubar.addMenu("Help")
+        self.help_menu.addAction("Check Deep Learning & GPU Setup...", lambda: check_startup_ai_environment(parent=self, force_show=True))
 
         self.tools_setup()
 
@@ -411,6 +439,29 @@ class VisionApp(QMainWindow):
         self.view_menu.addAction(self.process_dock.toggleViewAction())
         self.view_menu.addAction(self.dir_dock.toggleViewAction())
         self.view_menu.addAction(self.settings_dock.toggleViewAction())
+
+        self.view_menu.addSeparator()
+        self.action_split_view = QAction("Split View (Raw & Processed)", self)
+        self.action_split_view.setCheckable(True)
+        self.action_split_view.setShortcut(QKeySequence("Ctrl+Alt+S"))
+        self.action_split_view.setToolTip("Toggle Split View for Active Module (Raw & Processed side by side)")
+        self.action_split_view.triggered.connect(self.toggle_active_split_view)
+        self.action_split_view.setEnabled(False)
+        self.view_menu.addAction(self.action_split_view)
+
+        self.split_mode_menu = self.view_menu.addMenu("Split View Mode")
+        self.act_mode_sbs = self.split_mode_menu.addAction("Side by Side (Horizontal)")
+        self.act_mode_sbs.setCheckable(True)
+        self.act_mode_sbs.setChecked(True)
+        self.act_mode_sbs.triggered.connect(lambda: self.set_active_split_mode("side_by_side"))
+
+        self.act_mode_curt = self.split_mode_menu.addAction("Curtain / Split Screen (Swipe)")
+        self.act_mode_curt.setCheckable(True)
+        self.act_mode_curt.triggered.connect(lambda: self.set_active_split_mode("curtain"))
+
+        self.act_mode_tb = self.split_mode_menu.addAction("Top / Bottom (Vertical)")
+        self.act_mode_tb.setCheckable(True)
+        self.act_mode_tb.triggered.connect(lambda: self.set_active_split_mode("top_bottom"))
 
     def tools_setup(self):
         self.tool_group = QActionGroup(self)
@@ -584,6 +635,7 @@ class VisionApp(QMainWindow):
         self.active_module = module
         self.action_start.setEnabled(True)
         self.action_upload.setEnabled(True)
+        self.update_split_view_action_state(module)
         if hasattr(self, 'action_fullscreen_module'):
             self.action_fullscreen_module.setEnabled(True)
             if getattr(module, 'is_fullscreen_window', False):
@@ -804,6 +856,7 @@ class VisionApp(QMainWindow):
 
             if hasattr(self, 'action_fullscreen_module'):
                 self.action_fullscreen_module.setEnabled(False)
+            self.update_split_view_action_state(None)
 
         self.update_grid_layout()
 
@@ -825,6 +878,32 @@ class VisionApp(QMainWindow):
 
     def update_active_camera(self, camera_info):
         self.active_cameras.append(camera_info)
+
+    def toggle_active_split_view(self):
+        if self.active_module:
+            self.active_module.toggle_split_view()
+            self.update_split_view_action_state(self.active_module)
+
+    def set_active_split_mode(self, mode):
+        if self.active_module:
+            self.active_module.set_split_view(True, mode=mode)
+            self.update_split_view_action_state(self.active_module)
+
+    def update_split_view_action_state(self, mod=None):
+        target = mod or self.active_module
+        if hasattr(self, 'action_split_view'):
+            if target:
+                self.action_split_view.setEnabled(True)
+                is_split = getattr(target, 'split_view_enabled', False)
+                mode = getattr(target, 'split_view_mode', 'side_by_side')
+                self.action_split_view.setChecked(is_split)
+                if hasattr(self, 'act_mode_sbs'):
+                    self.act_mode_sbs.setChecked(mode == "side_by_side")
+                    self.act_mode_curt.setChecked(mode == "curtain")
+                    self.act_mode_tb.setChecked(mode == "top_bottom")
+            else:
+                self.action_split_view.setEnabled(False)
+                self.action_split_view.setChecked(False)
 
     def toggle_selected_module_fullscreen(self):
         """Fullscreens the selected module on full desktop / window"""
@@ -917,8 +996,19 @@ class VisionApp(QMainWindow):
         event.accept()
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
+    app = _startup_app or QApplication(sys.argv)
     app.setStyleSheet(app.styleSheet() + "\n" + CHECKBOX_STYLESHEET)
+
+    # Import PyTorch on a worker thread while the splash stays responsive.
+    # The result is cached, so the AI environment check after launch is instant.
+    try:
+        _startup_splash.run_in_background(
+            "Checking AI / GPU environment...", check_deep_learning_support, value=70)
+    except Exception as e:
+        print(f"[Startup] AI environment check failed: {e}")
+
+    _startup_step("Building user interface...", 85)
     window = VisionApp()
     window.showMaximized()
+    _startup_splash.finish(window)
     sys.exit(app.exec())
